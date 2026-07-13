@@ -62,7 +62,7 @@ jobs:
       - name: Test and Verify Libraries
         run: |
           echo "=== Verifying ELF Architecture ==="
-          FILE_OUTPUT=$(file out/Android/lib/libGLESv2_angle.so)
+          FILE_OUTPUT=$(file out/Android/libGLESv2_angle.so)
           echo $FILE_OUTPUT
           if echo "$FILE_OUTPUT" | grep -q "ELF 64-bit LSB shared object, ARM aarch64"; then
             echo "✅ Architecture is correct (arm64-v8a)."
@@ -72,14 +72,14 @@ jobs:
           fi
 
           echo "=== Verifying EGL/GLES Symbols ==="
-          if nm -D out/Android/lib/libEGL_angle.so | grep -q "eglInitialize"; then
+          if nm -D out/Android/libEGL_angle.so | grep -q "eglInitialize"; then
             echo "✅ libEGL_angle.so exports eglInitialize."
           else
             echo "❌ Missing EGL symbols!"
             exit 1
           fi
           
-          if nm -D out/Android/lib/libGLESv2_angle.so | grep -q "glDrawElements"; then
+          if nm -D out/Android/libGLESv2_angle.so | grep -q "glDrawElements"; then
             echo "✅ libGLESv2_angle.so exports glDrawElements."
           else
             echo "❌ Missing GLES symbols!"
@@ -92,8 +92,8 @@ jobs:
           STRIP=$(find $GITHUB_WORKSPACE/third_party/android_ndk/toolchains/llvm/prebuilt/linux-x86_64/bin -name llvm-strip | head -n 1)
           echo "Using strip tool: $STRIP"
           
-          $STRIP --strip-unneeded out/Android/lib/libGLESv2_angle.so -o release/libGLESv2_angle.so
-          $STRIP --strip-unneeded out/Android/lib/libEGL_angle.so -o release/libEGL_angle.so
+          $STRIP --strip-unneeded out/Android/libGLESv2_angle.so -o release/libGLESv2_angle.so
+          $STRIP --strip-unneeded out/Android/libEGL_angle.so -o release/libEGL_angle.so
           
           echo "Final .so sizes:"
           ls -lh release/
