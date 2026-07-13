@@ -1,4 +1,4 @@
-name: Build ANGLE for Android (Turnip/Zalith)
+name: Build ANGLE for Android (Embedded Qualcomm Driver)
 
 on:
   push:
@@ -44,6 +44,19 @@ jobs:
           EOF
           gclient sync --no-history --shallow
 
+      - name: Patch ANGLE to load embedded Qualcomm Driver
+        run: |
+          echo "Patching ANGLE source code to bypass system libvulkan.so..."
+          # Tìm tất cả file mã nguồn có gọi libvulkan.so
+          FILES=$(grep -rl "libvulkan.so" --include="*.cpp" --include="*.h" --include="*.cc" src/ third_party/)
+          
+          for f in $FILES; do
+            # Đổi libvulkan.so thành vulkan.adreno.so
+            # (Nếu file driver chính của bạn tên khác, hãy sửa dòng dưới này)
+            sed -i 's/libvulkan.so/vulkan.adreno.so/g' "$f"
+            echo "Patched: $f"
+          done
+
       - name: Configure GN (Android arm64, Vulkan only, Optimized)
         run: |
           gn gen out/Android --args='
@@ -80,7 +93,7 @@ jobs:
             exit 1
           fi
           
-          if nm -D out/Android/lib/libGLESv2_angle.so | grep -q "glDrawElements"; then
+          if nm -D out/Android/libGLESv2_angle.so | grep -q "glDrawElements"; then
             echo "✅ libGLESv2_angle.so exports glDrawElements."
           else
             echo "❌ Missing GLES symbols!"
@@ -108,6 +121,6 @@ jobs:
       - name: Upload Android Libraries
         uses: actions/upload-artifact@v4
         with:
-          name: angle-android-arm64-turnip
+          name: angle-android-arm64-embedded-qualcomm
           path: release/*.so
           retention-days: 30
