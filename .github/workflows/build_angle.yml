@@ -89,11 +89,17 @@ jobs:
       - name: Corrections (Strip and Package)
         run: |
           mkdir -p release
-          STRIP=$(find $GITHUB_WORKSPACE/third_party/android_ndk/toolchains/llvm/prebuilt/linux-x86_64/bin -name llvm-strip | head -n 1)
-          echo "Using strip tool: $STRIP"
+          STRIP=$(find $GITHUB_WORKSPACE/third_party -name "llvm-strip" -type f | head -n 1)
           
-          $STRIP --strip-unneeded out/Android/libGLESv2_angle.so -o release/libGLESv2_angle.so
-          $STRIP --strip-unneeded out/Android/libEGL_angle.so -o release/libEGL_angle.so
+          if [ -n "$STRIP" ]; then
+            echo "✅ Using strip tool: $STRIP"
+            $STRIP --strip-unneeded out/Android/libGLESv2_angle.so -o release/libGLESv2_angle.so
+            $STRIP --strip-unneeded out/Android/libEGL_angle.so -o release/libEGL_angle.so
+          else
+            echo "⚠️ Strip tool not found! Copying unstripped libraries instead."
+            cp out/Android/libGLESv2_angle.so release/libGLESv2_angle.so
+            cp out/Android/libEGL_angle.so release/libEGL_angle.so
+          fi
           
           echo "Final .so sizes:"
           ls -lh release/
