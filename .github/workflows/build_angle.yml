@@ -1,0 +1,111 @@
+name: Build ANGLE for Android (Turnip/Zalith)
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  # Allows you to manually trigger the build from the Actions tab
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout your ANGLE fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3 python3-pip ninja-build libgl1-mesa-dri libgl1-mesa-glx
+
+      - name: Setup depot_tools
+        run: |
+          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
+          echo "$GITHUB_WORKSPACE/depot_tools" >> $GITHUB_PATH
+
+      - name: Fetch ANGLE dependencies
+        run: |
+          # We need to create a .gclient file so gclient sync knows to pull DEPS for this repo
+          cat << EOF > .gclient
+          solutions = [
+            {
+              "name": ".",
+              "url": "https://github.com/${{ github.repository }}.git",
+              "deps_file": "DEPS",
+              "managed": False,
+              "custom_deps": {},
+              "custom_vars": {},
+            }
+          ]
+          EOF
+          gclient sync --no-history --shallow
+
+      - name: Configure GN (Android arm64, Vulkan only)
+        run: |
+          gn gen out/Android --args='
+            target_os="android" 
+            target_cpu="arm64" 
+            is_component_build=false 
+            is_debug=false 
+            angle_enable_vulkan=true 
+            angle_enable_gl=false 
+            angle_enable_share_context_lock=true
+          '
+
+      - name: Build ANGLE Libraries
+        run: ninja -C out/Android libEGL_angle libGLESv2_angle
+
+      - name: Test and Verify Libraries
+        run: |
+          echo "=== Verifying ELF Architecture ==="
+          # Ensure it's built for 64-bit ARM, not x86_64 (the runner's native arch)
+          FILE_OUTPUT=$(file out/Android/lib/libGLESv2_angle.so)
+          echo $FILE_OUTPUT
+          if echo "$FILE_OUTPUT" | grep -q "ELF 64-bit LSB shared object, ARM aarch64"; then
+            echo "✅ Architecture is correct (arm64-v8a)."
+          else
+            echo "❌ Architecture is incorrect! Failing build."
+            exit 1
+          fi
+
+          echo "=== Verifying EGL/GLES Symbols ==="
+          # Check that the library actually exposes the functions Zalith/GL4ES needs to call
+          if nm -D out/Android/lib/libEGL_angle.so | grep -q "eglInitialize"; then
+            echo "✅ libEGL_angle.so exports eglInitialize."
+          else
+            echo "❌ Missing EGL symbols!"
+            exit 1
+          fi
+          
+          if nm -D out/Android/lib/libGLESv2_angle.so | grep -q "glDrawElements"; then
+            echo "✅ libGLESv2_angle.so exports glDrawElements."
+          else
+            echo "❌ Missing GLES symbols!"
+            exit 1
+          fi
+
+      - name: Corrections (Strip and Package)
+        run: |
+          mkdir -p release
+          # Find the NDK strip tool downloaded by gclient sync
+          STRIP=$(find $GITHUB_WORKSPACE/third_party/android_ndk/toolchains/llvm/prebuilt/linux-x86_64/bin -name llvm-strip | head -n 1)
+          echo "Using strip tool: $STRIP"
+          
+          # Strip debug symbols to massively reduce .so file size for the launcher
+          $STRIP --strip-unneeded out/Android/lib/libGLESv2_angle.so -o release/libGLESv2_angle.so
+          $STRIP --strip-unneeded out/Android/lib/libEGL_angle.so -o release/libEGL_angle.so
+          
+          echo "Final .so sizes:"
+          ls -lh release/
+
+      - name: Upload Android Libraries
+        uses: actions/upload-artifact@v4
+        with:
+          name: angle-android-arm64-turnip
+          path: release/*.so
+          retention-days: 30
