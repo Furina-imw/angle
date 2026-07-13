@@ -44,7 +44,7 @@ jobs:
           EOF
           gclient sync --no-history --shallow
 
-      - name: Configure GN (Android arm64, Vulkan only)
+      - name: Configure GN (Android arm64, Vulkan only, Optimized)
         run: |
           gn gen out/Android --args='
             target_os="android" 
@@ -53,7 +53,9 @@ jobs:
             is_debug=false 
             angle_enable_vulkan=true 
             angle_enable_gl=false 
-            angle_enable_share_context_lock=true
+            is_official_build=true
+            symbol_level=0
+            angle_enable_vulkan_validation_layers=false
           '
 
       - name: Build ANGLE Libraries
