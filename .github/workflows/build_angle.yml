@@ -57,7 +57,7 @@ jobs:
           '
 
       - name: Build ANGLE Libraries
-        run: ninja -C out/Android libEGL_angle libGLESv2_angle
+        run: ninja -C out/Android libEGL_angle.so libGLESv2_angle.so
 
       - name: Test and Verify Libraries
         run: |
