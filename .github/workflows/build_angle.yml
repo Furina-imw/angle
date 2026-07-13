@@ -53,7 +53,6 @@ jobs:
             is_debug=false 
             angle_enable_vulkan=true 
             angle_enable_gl=false 
-            is_official_build=true
             symbol_level=0
             angle_enable_vulkan_validation_layers=false
           '
@@ -81,7 +80,7 @@ jobs:
             exit 1
           fi
           
-          if nm -D out/Android/libGLESv2_angle.so | grep -q "glDrawElements"; then
+          if nm -D out/Android/lib/libGLESv2_angle.so | grep -q "glDrawElements"; then
             echo "✅ libGLESv2_angle.so exports glDrawElements."
           else
             echo "❌ Missing GLES symbols!"
