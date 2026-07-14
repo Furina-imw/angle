@@ -53,7 +53,7 @@ jobs:
           for f in $FILES; do
             # Đổi libvulkan.so thành vulkan.adreno.so
             # (Nếu file driver chính của bạn tên khác, hãy sửa dòng dưới này)
-            sed -i 's/libvulkan.so/vulkan.adreno.so/g' "$f"
+            sed -i 's/libvulkan.so/lib_turnip.so/g' "$f"
             echo "Patched: $f"
           done
 
