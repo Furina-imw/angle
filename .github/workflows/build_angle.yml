@@ -47,24 +47,25 @@ jobs:
       - name: Patch ANGLE to load Zalith Hooked Driver
         run: |
           python3 << 'EOF'
-          import os, re
-          volk_file = "third_party/volk/volk.c"
-          if not os.path.exists(volk_file):
-              print("❌ volk.c not found!")
+          import os, re, glob
+          
+          target_files = []
+          for ext in ('*.c', '*.cpp', '*.cc', '*.h'):
+              for filepath in glob.glob(f'third_party/**/{ext}', recursive=True):
+                  try:
+                      with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                          content = f.read()
+                      if 'dlopen("libvulkan.so"' in content or "dlopen('libvulkan.so'" in content:
+                          target_files.append(filepath)
+                  except:
+                      pass
+          
+          if not target_files:
+              print("❌ Could not find any file containing dlopen(libvulkan.so)!")
               exit(1)
-          
-          with open(volk_file, 'r') as f:
-              content = f.read()
-          
-          if 'volk_zalith_loader' in content:
-              print("Already patched!")
-              exit(0)
               
-          # Thêm thư viện stdlib để dùng hàm getenv
-          if '#include <stdlib.h>' not in content:
-              content = '#include <stdlib.h>\n' + content
-              
-          # Hàm tự viết để đọc biến môi trường VK_ICD_FILENAMES do Zalith set
+          print(f"Found target files: {target_files}")
+          
           custom_func = '''
           static void* volk_zalith_loader() {
               const char* icd_path = getenv("VK_ICD_FILENAMES");
@@ -75,27 +76,40 @@ jobs:
               return dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
           }
           '''
-          # Chèn hàm vào sau các dòng #include
-          matches = list(re.finditer(r'#include.*\n', content))
-          if matches:
-              last_match = matches[-1]
-              content = content[:last_match.end()] + custom_func + content[last_match.end():]
-              
-          # Thay thế lệnh dlopen gốc bằng lệnh gọi hàm mới
-          content = content.replace(
-              'handle = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);',
-              'handle = volk_zalith_loader();'
-          )
-          # Dự phòng nếu format code khác chút xíu
-          content = content.replace(
-              'dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL)',
-              'volk_zalith_loader()'
-          )
           
-          with open(volk_file, 'w') as f:
-              f.write(content)
+          for filepath in target_files:
+              with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                  content = f.read()
               
-          print(f"Patched {volk_file} successfully!")
+              if 'volk_zalith_loader' in content:
+                  print(f"Already patched: {filepath}")
+                  continue
+                  
+              if '#include <stdlib.h>' not in content:
+                  content = '#include <stdlib.h>\n' + content
+                  
+              matches = list(re.finditer(r'#include.*\n', content))
+              if matches:
+                  last_match = matches[-1]
+                  content = content[:last_match.end()] + custom_func + content[last_match.end():]
+                  
+              content = content.replace(
+                  'handle = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);',
+                  'handle = volk_zalith_loader();'
+              )
+              content = content.replace(
+                  'dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL)',
+                  'volk_zalith_loader()'
+              )
+              content = content.replace(
+                  "dlopen('libvulkan.so', RTLD_NOW | RTLD_LOCAL)",
+                  'volk_zalith_loader()'
+              )
+              
+              with open(filepath, 'w', encoding='utf-8') as f:
+                  f.write(content)
+                  
+              print(f"Patched {filepath} successfully!")
           EOF
 
       - name: Configure GN (Android arm64, Vulkan only, Optimized)
