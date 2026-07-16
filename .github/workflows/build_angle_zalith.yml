@@ -92,7 +92,7 @@ jobs:
           void ZalithGenerateTurnipICD()
           {
               const char *driverDir = getenv("DRIVER_PATH");
-              if (!driverDir || driverDir[0] == '\\\\0')
+              if (!driverDir || driverDir[0] == '\0')
               {
                   return;  // Not running under Zalith Launcher 2 / no driver override — do nothing.
               }
@@ -107,7 +107,7 @@ jobs:
               }
 
               const char *cacheDir = getenv("TMPDIR");
-              if (!cacheDir || cacheDir[0] == '\\\\0')
+              if (!cacheDir || cacheDir[0] == '\0')
               {
                   cacheDir = "/data/local/tmp";
               }
@@ -122,13 +122,13 @@ jobs:
               }
 
               fprintf(f,
-                      "{\\n"
-                      "    \\"file_format_version\\": \\"1.0.0\\",\\n"
-                      "    \\"ICD\\": {\\n"
-                      "        \\"library_path\\": \\"%s\\",\\n"
-                      "        \\"api_version\\": \\"1.3.0\\"\\n"
-                      "    }\\n"
-                      "}\\n",
+                      "{\n"
+                      "    \"file_format_version\": \"1.0.0\",\n"
+                      "    \"ICD\": {\n"
+                      "        \"library_path\": \"%s\",\n"
+                      "        \"api_version\": \"1.3.0\"\n"
+                      "    }\n"
+                      "}\n",
                       soPath);
               fclose(f);
 
@@ -148,25 +148,47 @@ jobs:
               lines.insert(last_include_idx + 1, helper_code)
               content = '\n'.join(lines)
 
-              # Call it as the very first statement inside RendererVk::initialize / Renderer::initialize,
-              # before volkInitialize() so the env var is set before Volk (and the system Vulkan
-              # loader it dlopen's) reads it.
-              call_site = 'ANGLE_VK_TRY(displayVk, volkInitialize());'
-              if call_site in content:
-                  content = content.replace(
-                      call_site,
-                      'ZalithGenerateTurnipICD();\n    ' + call_site,
-                      1,  # only the first occurrence — the real init path
-                  )
-                  print("Inserted ZalithGenerateTurnipICD() call before volkInitialize().")
-              else:
-                  print("WARNING: could not find 'volkInitialize()' call site — helper was")
-                  print("inserted but NOT wired up. Manual patch required for this ANGLE revision.")
-                  print("Search the target file for where volkInitialize() or the equivalent")
-                  print("Vulkan loader bootstrap happens, and call ZalithGenerateTurnipICD() first.")
+              # Call it as the very first statement before volkInitialize() so the env var
+              # is set before Volk (and the system Vulkan loader it dlopen's) reads it.
+              # Different ANGLE revisions wrap this call differently, so try several
+              # known patterns instead of a single hardcoded string.
+              import re
+              candidate_patterns = [
+                  r'(ANGLE_VK_TRY\(displayVk,\s*volkInitialize\(\)\);)',
+                  r'(ANGLE_VK_TRY\(this,\s*volkInitialize\(\)\);)',
+                  r'(\bvolkInitialize\(\);)',
+              ]
+
+              wired = False
+              for pattern in candidate_patterns:
+                  m = re.search(pattern, content)
+                  if m:
+                      matched_text = m.group(1)
+                      content = content.replace(
+                          matched_text,
+                          'ZalithGenerateTurnipICD();\n    ' + matched_text,
+                          1,
+                      )
+                      print(f"Inserted ZalithGenerateTurnipICD() call before: {matched_text}")
+                      wired = True
+                      break
 
               with open(target_file, 'w', encoding='utf-8') as f:
                   f.write(content)
+
+              if not wired:
+                  print("ERROR: could not find any volkInitialize() call pattern in "
+                        f"{target_file}.")
+                  print("The helper function was inserted but is NOT called anywhere, so ")
+                  print("this build would silently do nothing useful. Failing the build ")
+                  print("instead of shipping a no-op patch — inspect the file below and ")
+                  print("update candidate_patterns in this workflow to match it.")
+                  # Print the lines around any 'volkInitialize' mention, if present at all,
+                  # to make manual follow-up fast.
+                  for i, line in enumerate(content.split('\n')):
+                      if 'volkInitialize' in line or 'Volk' in line:
+                          print(f"{target_file}:{i+1}: {line}")
+                  exit(1)
 
               print(f"Patched {target_file} successfully!")
           PYEOF
