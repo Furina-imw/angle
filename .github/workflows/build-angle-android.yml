@@ -1,0 +1,171 @@
+name: Build ANGLE for Android (arm64-v8a)
+
+# Builds libEGL_angle.so / libGLESv2_angle.so for arm64-v8a using ANGLE's
+# standard depot_tools + gn/ninja toolchain against the Android NDK.
+#
+# Trigger modes:
+#   - push / pull_request on main: quick sanity build (Debug, verifies the
+#     patched libvulkan_loader.cpp compiles and links cleanly)
+#   - tag push matching "v*": full Release build + artifact upload
+#   - manual dispatch: choose build type on demand
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: "GN is_debug build type"
+        required: true
+        default: "Release"
+        type: choice
+        options:
+          - Release
+          - Debug
+
+env:
+  # Keep depot_tools + gclient caches on a fixed path so actions/cache can key on it
+  DEPOT_TOOLS_DIR: ${{ github.workspace }}/depot_tools
+  ANGLE_DIR: ${{ github.workspace }}/angle
+  # ANGLE's DEPS pulls a pinned NDK version itself (third_party/android_ndk),
+  # so we do not need to install one separately.
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+
+jobs:
+  build:
+    name: gn/ninja build (arm64-v8a, ${{ github.event.inputs.build_type || 'Release' }})
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android/sdk/ndk-bundle \
+            /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune -af || true
+
+      - name: Checkout ANGLE fork
+        uses: actions/checkout@v4
+        with:
+          path: angle
+          fetch-depth: 1
+
+      - name: Install Linux build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            git python3 python3-pip curl ca-certificates \
+            pkg-config build-essential ccache
+
+      - name: Cache depot_tools
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.DEPOT_TOOLS_DIR }}
+          key: depot-tools-${{ runner.os }}
+
+      - name: Fetch depot_tools
+        run: |
+          if [ ! -d "$DEPOT_TOOLS_DIR/.git" ]; then
+            git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git "$DEPOT_TOOLS_DIR"
+          fi
+          echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-angle-android-arm64-${{ github.sha }}
+          restore-keys: |
+            ccache-angle-android-arm64-
+
+      - name: Cache gclient third_party checkout
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.ANGLE_DIR }}/third_party
+            ${{ env.ANGLE_DIR }}/build
+            ${{ env.ANGLE_DIR }}/buildtools
+            ${{ env.ANGLE_DIR }}/tools
+          key: angle-gclient-${{ hashFiles('angle/DEPS') }}
+          restore-keys: |
+            angle-gclient-
+
+      - name: gclient sync (pulls pinned Android NDK + build deps)
+        working-directory: ${{ env.ANGLE_DIR }}
+        run: |
+          export PATH="$DEPOT_TOOLS_DIR:$PATH"
+          export DEPOT_TOOLS_UPDATE=0
+          python3 scripts/bootstrap.py
+          gclient config --unmanaged --name=angle "$(git remote get-url origin)"
+          # Point gclient at this checkout instead of re-cloning
+          cat > .gclient <<EOF
+          solutions = [
+            {
+              "name": ".",
+              "url": "$(git remote get-url origin)",
+              "deps_file": "DEPS",
+              "managed": False,
+              "custom_deps": {},
+            },
+          ]
+          target_os = ["android"]
+          EOF
+          gclient sync -D --no-history --shallow
+
+      - name: Generate GN build files
+        working-directory: ${{ env.ANGLE_DIR }}
+        run: |
+          export PATH="$DEPOT_TOOLS_DIR:$PATH"
+          BUILD_TYPE="${{ github.event.inputs.build_type || 'Release' }}"
+          if [ "$BUILD_TYPE" = "Release" ]; then IS_DEBUG=false; else IS_DEBUG=true; fi
+
+          gn gen out/Android \
+            --args="
+              target_os=\"android\"
+              target_cpu=\"arm64\"
+              is_debug=${IS_DEBUG}
+              is_component_build=false
+              angle_enable_vulkan=true
+              angle_enable_gl=false
+              angle_enable_essl=true
+              angle_enable_glsl=true
+              angle_enable_null=false
+              angle_enable_swiftshader=false
+              angle_enable_vulkan_validation_layers=false
+              angle_build_tests=false
+              use_custom_libcxx=true
+              cc_wrapper=\"ccache\"
+            "
+
+      - name: Build libEGL_angle.so / libGLESv2_angle.so
+        working-directory: ${{ env.ANGLE_DIR }}
+        run: |
+          export PATH="$DEPOT_TOOLS_DIR:$PATH"
+          export CCACHE_DIR="$CCACHE_DIR"
+          autoninja -C out/Android libEGL libGLESv2
+
+      - name: Collect build output
+        working-directory: ${{ env.ANGLE_DIR }}
+        run: |
+          mkdir -p dist/arm64-v8a
+          cp out/Android/libEGL.so    dist/arm64-v8a/libEGL_angle.so
+          cp out/Android/libGLESv2.so dist/arm64-v8a/libGLESv2_angle.so
+          ls -lh dist/arm64-v8a
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: angle-android-arm64-v8a-${{ github.sha }}
+          path: angle/dist/arm64-v8a/*.so
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Attach to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: angle/dist/arm64-v8a/*.so
+          generate_release_notes: true
