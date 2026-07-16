@@ -154,6 +154,13 @@ jobs:
               # known patterns instead of a single hardcoded string.
               import re
               candidate_patterns = [
+                  # Newer ANGLE (vk_renderer.cpp): OpenLibVulkan() is what actually dlopen's
+                  # libvulkan.so — this must run BEFORE that, not before volkInitializeCustom.
+                  r'(mLibVulkanLibrary\s*=\s*angle::vk::OpenLibVulkan\(\);)',
+                  # Fallback: some revisions may inline volkInitializeCustom without the
+                  # OpenLibVulkan wrapper — patch right before it in that case.
+                  r'(volkInitializeCustom\([^)]*\);)',
+                  # Older ANGLE (RendererVk.cpp)
                   r'(ANGLE_VK_TRY\(displayVk,\s*volkInitialize\(\)\);)',
                   r'(ANGLE_VK_TRY\(this,\s*volkInitialize\(\)\);)',
                   r'(\bvolkInitialize\(\);)',
