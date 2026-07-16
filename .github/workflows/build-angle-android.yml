@@ -75,6 +75,17 @@ jobs:
           # Suppress depot_tools' interactive metrics-collection prompt in CI.
           echo "DEPOT_TOOLS_METRICS=0" >> "$GITHUB_ENV"
 
+      - name: Bootstrap depot_tools
+        run: |
+          export PATH="$DEPOT_TOOLS_DIR:$PATH"
+          # Do NOT set DEPOT_TOOLS_UPDATE=0 here: the first invocation needs to be
+          # allowed to self-update/bootstrap, which is what generates
+          # python3_bin_reldir.txt and fetches the CIPD-hosted gn/ninja binaries.
+          # Running `gclient` with no args is enough to trigger this and exits 0.
+          gclient || true
+          test -f "$DEPOT_TOOLS_DIR/python3_bin_reldir.txt" && \
+            echo "depot_tools bootstrap OK: $(cat "$DEPOT_TOOLS_DIR/python3_bin_reldir.txt")"
+
       - name: Cache ccache
         uses: actions/cache@v4
         with:
@@ -99,7 +110,6 @@ jobs:
         working-directory: ${{ env.ANGLE_DIR }}
         run: |
           export PATH="$DEPOT_TOOLS_DIR:$PATH"
-          export DEPOT_TOOLS_UPDATE=0
 
           # Point gclient at this checkout instead of re-cloning from googlesource.
           cat > .gclient <<EOF
@@ -115,9 +125,6 @@ jobs:
           target_os = ["android"]
           EOF
 
-          # First real depot_tools invocation: this is what fetches the CIPD-hosted
-          # gn/ninja binaries and generates python3_bin_reldir.txt, in addition to
-          # syncing third_party/ deps (including the pinned Android NDK).
           gclient sync -D --no-history --shallow
 
       - name: Generate GN build files
