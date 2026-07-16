@@ -73,6 +73,17 @@ jobs:
           fi
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
 
+      - name: Bootstrap depot_tools
+        run: |
+          export PATH="$DEPOT_TOOLS_DIR:$PATH"
+          export DEPOT_TOOLS_UPDATE=1
+          # Running any depot_tools entrypoint (gclient/gn/ninja wrapper) for the
+          # first time triggers depot_tools' own bootstrap, which generates the
+          # python3_bin_reldir.txt file that gn/gclient look for on later calls.
+          gclient --version
+          gn --version
+          ninja --version
+
       - name: Cache ccache
         uses: actions/cache@v4
         with:
@@ -98,7 +109,6 @@ jobs:
         run: |
           export PATH="$DEPOT_TOOLS_DIR:$PATH"
           export DEPOT_TOOLS_UPDATE=0
-          python3 scripts/bootstrap.py
           gclient config --unmanaged --name=angle "$(git remote get-url origin)"
           # Point gclient at this checkout instead of re-cloning
           cat > .gclient <<EOF
