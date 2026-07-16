@@ -159,12 +159,35 @@ jobs:
           export CCACHE_DIR="$CCACHE_DIR"
           autoninja -C out/Android libEGL libGLESv2
 
+      - name: Inspect build output (debug)
+        working-directory: ${{ env.ANGLE_DIR }}
+        run: |
+          echo "== everything under out/Android matching libEGL/libGLESv2 =="
+          find out/Android -iname "*libegl*" -o -iname "*libgles*" 2>/dev/null
+          echo "== full top-level listing of out/Android =="
+          ls -la out/Android | head -60
+
       - name: Collect build output
         working-directory: ${{ env.ANGLE_DIR }}
         run: |
+          set -eu
           mkdir -p dist/arm64-v8a
-          cp out/Android/libEGL.so    dist/arm64-v8a/libEGL_angle.so
-          cp out/Android/libGLESv2.so dist/arm64-v8a/libGLESv2_angle.so
+
+          egl_so=$(find out/Android -iname "libEGL.so" -print -quit)
+          gles_so=$(find out/Android -iname "libGLESv2.so" -print -quit)
+
+          if [ -z "$egl_so" ] || [ -z "$gles_so" ]; then
+            echo "Could not locate built libEGL.so / libGLESv2.so under out/Android." >&2
+            echo "Contents matching libegl/libgles (case-insensitive):" >&2
+            find out/Android -iname "*libegl*" -o -iname "*libgles*" >&2 || true
+            exit 1
+          fi
+
+          echo "Found libEGL.so at:    $egl_so"
+          echo "Found libGLESv2.so at: $gles_so"
+
+          cp "$egl_so"  dist/arm64-v8a/libEGL_angle.so
+          cp "$gles_so" dist/arm64-v8a/libGLESv2_angle.so
           ls -lh dist/arm64-v8a
 
       - name: Upload build artifact
