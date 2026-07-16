@@ -1,0 +1,238 @@
+name: Build ANGLE for Android (Zalith Turnip ICD Hook)
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout your ANGLE fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3 python3-pip ninja-build libgl1-mesa-dri libgl1
+
+      - name: Setup depot_tools
+        run: |
+          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
+          echo "$GITHUB_WORKSPACE/depot_tools" >> $GITHUB_PATH
+
+      - name: Fetch ANGLE dependencies
+        run: |
+          cat << EOF > .gclient
+          solutions = [
+            {
+              "name": ".",
+              "url": "https://github.com/${{ github.repository }}.git",
+              "deps_file": "DEPS",
+              "managed": False,
+              "custom_deps": {},
+              "custom_vars": {},
+            }
+          ]
+          target_os = [ "android" ]
+          EOF
+          gclient sync --no-history --shallow
+
+      - name: Patch ANGLE to auto-generate Turnip ICD JSON at runtime
+        run: |
+          python3 << 'PYEOF'
+          import glob
+
+          # Find RendererVk.cpp / vk_renderer.cpp — whichever exists in this ANGLE revision.
+          candidates = []
+          for pattern in (
+              'src/libANGLE/renderer/vulkan/RendererVk.cpp',
+              'src/libANGLE/renderer/vulkan/vk_renderer.cpp',
+          ):
+              candidates.extend(glob.glob(pattern))
+
+          if not candidates:
+              print("Could not find RendererVk.cpp or vk_renderer.cpp")
+              exit(1)
+
+          target_file = candidates[0]
+          print(f"Patching: {target_file}")
+
+          with open(target_file, 'r', encoding='utf-8', errors='ignore') as f:
+              content = f.read()
+
+          if 'ZalithGenerateTurnipICD' in content:
+              print("Already patched, skipping.")
+          else:
+              # Injected helper: reads DRIVER_PATH, writes a minimal Vulkan ICD manifest
+              # pointing at libvulkan_freedreno.so inside it, and points VK_ICD_FILENAMES
+              # at that manifest before the Vulkan loader (libvulkan.so) is dlopen'd by Volk.
+              # If DRIVER_PATH is unset, or the expected .so is missing, this is a silent
+              # no-op and ANGLE falls back to whatever the system loader picks — it never
+              # blocks or retries, avoiding the ANR/hang seen with the previous patch.
+              helper_code = '''
+          // --- Zalith Turnip ICD hook -------------------------------------------------
+          // Generates a Vulkan ICD manifest at runtime pointing to the Turnip driver
+          // that Zalith Launcher 2 already loaded via DRIVER_PATH, and points
+          // VK_ICD_FILENAMES at it so the system Vulkan loader picks it up instead of
+          // /vendor/lib64/hw/vulkan.<board>.so. Safe no-op if anything is missing.
+          #include <cstdio>
+          #include <cstdlib>
+          #include <cstring>
+          #include <sys/stat.h>
+
+          namespace
+          {
+          void ZalithGenerateTurnipICD()
+          {
+              const char *driverDir = getenv("DRIVER_PATH");
+              if (!driverDir || driverDir[0] == '\\\\0')
+              {
+                  return;  // Not running under Zalith Launcher 2 / no driver override — do nothing.
+              }
+
+              char soPath[1024];
+              snprintf(soPath, sizeof(soPath), "%s/libvulkan_freedreno.so", driverDir);
+
+              struct stat st;
+              if (stat(soPath, &st) != 0)
+              {
+                  return;  // Turnip .so not found at expected location — leave system driver alone.
+              }
+
+              const char *cacheDir = getenv("TMPDIR");
+              if (!cacheDir || cacheDir[0] == '\\\\0')
+              {
+                  cacheDir = "/data/local/tmp";
+              }
+
+              char jsonPath[1024];
+              snprintf(jsonPath, sizeof(jsonPath), "%s/zalith_turnip_icd.json", cacheDir);
+
+              FILE *f = fopen(jsonPath, "w");
+              if (!f)
+              {
+                  return;  // Could not write manifest (read-only dir, etc) — fall back silently.
+              }
+
+              fprintf(f,
+                      "{\\n"
+                      "    \\"file_format_version\\": \\"1.0.0\\",\\n"
+                      "    \\"ICD\\": {\\n"
+                      "        \\"library_path\\": \\"%s\\",\\n"
+                      "        \\"api_version\\": \\"1.3.0\\"\\n"
+                      "    }\\n"
+                      "}\\n",
+                      soPath);
+              fclose(f);
+
+              setenv("VK_ICD_FILENAMES", jsonPath, 1);
+          }
+          }  // namespace
+          // --- end Zalith Turnip ICD hook ---------------------------------------------
+          '''
+
+              # Insert the helper after the last #include line (top of file).
+              lines = content.split('\n')
+              last_include_idx = 0
+              for i, line in enumerate(lines):
+                  if line.strip().startswith('#include'):
+                      last_include_idx = i
+
+              lines.insert(last_include_idx + 1, helper_code)
+              content = '\n'.join(lines)
+
+              # Call it as the very first statement inside RendererVk::initialize / Renderer::initialize,
+              # before volkInitialize() so the env var is set before Volk (and the system Vulkan
+              # loader it dlopen's) reads it.
+              call_site = 'ANGLE_VK_TRY(displayVk, volkInitialize());'
+              if call_site in content:
+                  content = content.replace(
+                      call_site,
+                      'ZalithGenerateTurnipICD();\n    ' + call_site,
+                      1,  # only the first occurrence — the real init path
+                  )
+                  print("Inserted ZalithGenerateTurnipICD() call before volkInitialize().")
+              else:
+                  print("WARNING: could not find 'volkInitialize()' call site — helper was")
+                  print("inserted but NOT wired up. Manual patch required for this ANGLE revision.")
+                  print("Search the target file for where volkInitialize() or the equivalent")
+                  print("Vulkan loader bootstrap happens, and call ZalithGenerateTurnipICD() first.")
+
+              with open(target_file, 'w', encoding='utf-8') as f:
+                  f.write(content)
+
+              print(f"Patched {target_file} successfully!")
+          PYEOF
+
+      - name: Configure GN (Android arm64, Vulkan only, Optimized)
+        run: |
+          gn gen out/Android --args='
+            target_os="android"
+            target_cpu="arm64"
+            is_component_build=false
+            is_debug=false
+            angle_enable_vulkan=true
+            angle_enable_gl=false
+            symbol_level=0
+            angle_enable_vulkan_validation_layers=false
+          '
+
+      - name: Build ANGLE Libraries
+        run: ninja -C out/Android libEGL_angle.so libGLESv2_angle.so
+
+      - name: Test and Verify Libraries
+        run: |
+          echo "=== Verifying ELF Architecture ==="
+          FILE_OUTPUT=$(file out/Android/libGLESv2_angle.so)
+          echo $FILE_OUTPUT
+          if echo "$FILE_OUTPUT" | grep -q "ELF 64-bit LSB shared object, ARM aarch64"; then
+            echo "✅ Architecture is correct (arm64-v8a)."
+          else
+            echo "❌ Architecture is incorrect! Failing build."
+            exit 1
+          fi
+
+          echo "=== Verifying ZalithGenerateTurnipICD symbol is present ==="
+          if nm out/Android/libGLESv2_angle.so 2>/dev/null | grep -qi "ZalithGenerateTurnipICD" || \
+             strings out/Android/libGLESv2_angle.so | grep -qi "zalith_turnip_icd"; then
+            echo "✅ Patch appears to be linked into the binary."
+          else
+            echo "⚠️  Could not verify patch symbol in binary (may be inlined/stripped later — check manually)."
+          fi
+
+          echo "=== Verifying EGL/GLES Symbols ==="
+          if nm -D out/Android/libEGL_angle.so | grep -q "eglInitialize"; then
+            echo "✅ libEGL_angle.so exports eglInitialize."
+          else
+            echo "❌ Missing EGL symbols!"
+            exit 1
+          fi
+
+          if nm -D out/Android/libGLESv2_angle.so | grep -q "glDrawElements"; then
+            echo "✅ libGLESv2_angle.so exports glDrawElements."
+          else
+            echo "❌ Missing GLES symbols!"
+            exit 1
+          fi
+
+      - name: Package (unstripped — keep symbols for debugging first)
+        run: |
+          mkdir -p release
+          cp out/Android/libGLESv2_angle.so release/libGLESv2_angle.so
+          cp out/Android/libEGL_angle.so release/libEGL_angle.so
+          echo "Final .so sizes:"
+          ls -lh release/
+
+      - name: Upload Android Libraries
+        uses: actions/upload-artifact@v4
+        with:
+          name: angle-android-arm64-zalith-turnip-icd
+          path: release/*.so
+          retention-days: 30
