@@ -1,4 +1,4 @@
-name: Build ANGLE for Android (Zalith Turnip ICD Hook)
+name: Build ANGLE for Android (Zalith Turnip Direct-Load Hook)
 
 on:
   push:
@@ -44,57 +44,69 @@ jobs:
           EOF
           gclient sync --no-history --shallow
 
-      - name: Patch ANGLE to auto-generate Turnip ICD JSON at runtime
+      - name: Patch ANGLE to dlopen the Turnip driver directly
         run: |
           python3 << 'PYEOF'
-          import glob
+          target_file = 'src/libANGLE/renderer/vulkan/vk_renderer.cpp'
 
-          # Find RendererVk.cpp / vk_renderer.cpp — whichever exists in this ANGLE revision.
-          candidates = []
-          for pattern in (
-              'src/libANGLE/renderer/vulkan/RendererVk.cpp',
-              'src/libANGLE/renderer/vulkan/vk_renderer.cpp',
-          ):
-              candidates.extend(glob.glob(pattern))
-
-          if not candidates:
-              print("Could not find RendererVk.cpp or vk_renderer.cpp")
-              exit(1)
-
-          target_file = candidates[0]
-          print(f"Patching: {target_file}")
-
-          with open(target_file, 'r', encoding='utf-8', errors='ignore') as f:
+          with open(target_file, encoding='utf-8') as f:
               content = f.read()
 
-          if 'ZalithGenerateTurnipICD' in content:
-              print("Already patched, skipping.")
+          if 'ZalithOpenTurnipDirectly' in content:
+              print(f"{target_file} already patched, skipping.")
           else:
-              # Injected helper: reads DRIVER_PATH, writes a minimal Vulkan ICD manifest
-              # pointing at libvulkan_freedreno.so inside it, and points VK_ICD_FILENAMES
-              # at that manifest before the Vulkan loader (libvulkan.so) is dlopen'd by Volk.
-              # If DRIVER_PATH is unset, or the expected .so is missing, this is a silent
-              # no-op and ANGLE falls back to whatever the system loader picks — it never
-              # blocks or retries, avoiding the ANR/hang seen with the previous patch.
-              helper_code = '''
-          // --- Zalith Turnip ICD hook -------------------------------------------------
-          // Generates a Vulkan ICD manifest at runtime pointing to the Turnip driver
-          // that Zalith Launcher 2 already loaded via DRIVER_PATH, and points
-          // VK_ICD_FILENAMES at it so the system Vulkan loader picks it up instead of
-          // /vendor/lib64/hw/vulkan.<board>.so. Safe no-op if anything is missing.
-          #include <cstdio>
-          #include <cstdlib>
-          #include <cstring>
-          #include <sys/stat.h>
+              # --- Hunk 1: add the includes this hook needs ---------------------------
+              old1 = '''#include <EGL/eglext.h>
+          #include <fstream>
 
-          namespace
-          {
-          void ZalithGenerateTurnipICD()
+          #include "common/debug.h"'''
+              new1 = '''#include <EGL/eglext.h>
+          #include <fstream>
+
+          #if defined(ANGLE_PLATFORM_ANDROID)
+          #    include <dlfcn.h>
+          #    include <sys/stat.h>
+          #endif
+
+          #include "common/debug.h"'''
+              assert content.count(old1) == 1, (
+                  f"Hunk 1 anchor not found exactly once (found {content.count(old1)}) "
+                  f"in {target_file}. ANGLE's includes near the top of this file have "
+                  "likely changed — update this workflow's old1/new1 to match."
+              )
+              content = content.replace(old1, new1)
+
+              # --- Hunk 2: define the helper function in the anonymous namespace ------
+              old2 = '''#if defined(ANGLE_ENABLE_VULKAN_API_DUMP_LAYER)
+          constexpr bool kEnableVulkanAPIDumpLayer = true;
+          #else
+          constexpr bool kEnableVulkanAPIDumpLayer = false;
+          #endif
+          }  // anonymous namespace'''
+              new2 = '''#if defined(ANGLE_ENABLE_VULKAN_API_DUMP_LAYER)
+          constexpr bool kEnableVulkanAPIDumpLayer = true;
+          #else
+          constexpr bool kEnableVulkanAPIDumpLayer = false;
+          #endif
+
+          #if defined(ANGLE_PLATFORM_ANDROID)
+          // --- Zalith Turnip direct-load hook -----------------------------------------
+          // Zalith Launcher 2 (and MobileGlues) preload a Turnip Vulkan driver and expose
+          // its containing directory via the DRIVER_PATH environment variable, but the
+          // driver is never registered with the Android Vulkan HAL (it lives outside
+          // /vendor/lib64/hw and Android's loader has no concept of VK_ICD_FILENAMES).
+          // Since any conformant Vulkan ICD exports vkGetInstanceProcAddr directly, we
+          // can dlopen the driver .so ourselves and hand that symbol to
+          // volkInitializeCustom in place of the one obtained from the system
+          // libvulkan.so. Returns the opened library handle (to be closed the same way
+          // as the regular Vulkan library) or nullptr if nothing applicable was found,
+          // in which case the caller should fall back to angle::vk::OpenLibVulkan().
+          void *ZalithOpenTurnipDirectly()
           {
               const char *driverDir = getenv("DRIVER_PATH");
-              if (!driverDir || driverDir[0] == '\0')
+              if (!driverDir || driverDir[0] == '\\0')
               {
-                  return;  // Not running under Zalith Launcher 2 / no driver override — do nothing.
+                  return nullptr;
               }
 
               char soPath[1024];
@@ -103,101 +115,59 @@ jobs:
               struct stat st;
               if (stat(soPath, &st) != 0)
               {
-                  return;  // Turnip .so not found at expected location — leave system driver alone.
+                  return nullptr;
               }
 
-              const char *cacheDir = getenv("TMPDIR");
-              if (!cacheDir || cacheDir[0] == '\0')
-              {
-                  cacheDir = "/data/local/tmp";
-              }
-
-              char jsonPath[1024];
-              snprintf(jsonPath, sizeof(jsonPath), "%s/zalith_turnip_icd.json", cacheDir);
-
-              FILE *f = fopen(jsonPath, "w");
-              if (!f)
-              {
-                  return;  // Could not write manifest (read-only dir, etc) — fall back silently.
-              }
-
-              fprintf(f,
-                      "{\n"
-                      "    \"file_format_version\": \"1.0.0\",\n"
-                      "    \"ICD\": {\n"
-                      "        \"library_path\": \"%s\",\n"
-                      "        \"api_version\": \"1.3.0\"\n"
-                      "    }\n"
-                      "}\n",
-                      soPath);
-              fclose(f);
-
-              setenv("VK_ICD_FILENAMES", jsonPath, 1);
+              return dlopen(soPath, RTLD_NOW);
           }
-          }  // namespace
-          // --- end Zalith Turnip ICD hook ---------------------------------------------
-          '''
+          #endif  // defined(ANGLE_PLATFORM_ANDROID)
+          }  // anonymous namespace'''
+              assert content.count(old2) == 1, (
+                  f"Hunk 2 anchor not found exactly once (found {content.count(old2)}) "
+                  f"in {target_file}. The kEnableVulkanAPIDumpLayer block ANGLE uses to "
+                  "close its top anonymous namespace has likely changed — update this "
+                  "workflow's old2/new2 to match the current file."
+              )
+              content = content.replace(old2, new2)
 
-              # Insert the helper after the last #include line (top of file).
-              lines = content.split('\n')
-              last_include_idx = 0
-              for i, line in enumerate(lines):
-                  if line.strip().startswith('#include'):
-                      last_include_idx = i
-
-              lines.insert(last_include_idx + 1, helper_code)
-              content = '\n'.join(lines)
-
-              # Call it as the very first statement before volkInitialize() so the env var
-              # is set before Volk (and the system Vulkan loader it dlopen's) reads it.
-              # Different ANGLE revisions wrap this call differently, so try several
-              # known patterns instead of a single hardcoded string.
-              import re
-              candidate_patterns = [
-                  # Newer ANGLE (vk_renderer.cpp): OpenLibVulkan() is what actually dlopen's
-                  # libvulkan.so — this must run BEFORE that, not before volkInitializeCustom.
-                  r'(mLibVulkanLibrary\s*=\s*angle::vk::OpenLibVulkan\(\);)',
-                  # Fallback: some revisions may inline volkInitializeCustom without the
-                  # OpenLibVulkan wrapper — patch right before it in that case.
-                  r'(volkInitializeCustom\([^)]*\);)',
-                  # Older ANGLE (RendererVk.cpp)
-                  r'(ANGLE_VK_TRY\(displayVk,\s*volkInitialize\(\)\);)',
-                  r'(ANGLE_VK_TRY\(this,\s*volkInitialize\(\)\);)',
-                  r'(\bvolkInitialize\(\);)',
-              ]
-
-              wired = False
-              for pattern in candidate_patterns:
-                  m = re.search(pattern, content)
-                  if m:
-                      matched_text = m.group(1)
-                      content = content.replace(
-                          matched_text,
-                          'ZalithGenerateTurnipICD();\n    ' + matched_text,
-                          1,
-                      )
-                      print(f"Inserted ZalithGenerateTurnipICD() call before: {matched_text}")
-                      wired = True
-                      break
+              # --- Hunk 3: wire the helper into Renderer::initialize() ----------------
+              old3 = '''        ANGLE_SCOPED_DISABLE_MSAN();
+                  mLibVulkanLibrary = angle::vk::OpenLibVulkan();
+                  ANGLE_VK_CHECK(context, mLibVulkanLibrary, VK_ERROR_INITIALIZATION_FAILED);'''
+              # Note: source uses 8-space indent for this block; match exactly.
+              old3 = (
+                  "        ANGLE_SCOPED_DISABLE_MSAN();\n"
+                  "        mLibVulkanLibrary = angle::vk::OpenLibVulkan();\n"
+                  "        ANGLE_VK_CHECK(context, mLibVulkanLibrary, VK_ERROR_INITIALIZATION_FAILED);"
+              )
+              new3 = (
+                  "        ANGLE_SCOPED_DISABLE_MSAN();\n"
+                  "#if defined(ANGLE_PLATFORM_ANDROID)\n"
+                  "        // Try loading a Turnip driver that Zalith Launcher 2 already preloaded via\n"
+                  "        // DRIVER_PATH first; fall back to the normal system libvulkan.so if that's\n"
+                  "        // not applicable (not running under Zalith, driver missing, etc).\n"
+                  "        mLibVulkanLibrary = ZalithOpenTurnipDirectly();\n"
+                  "        if (!mLibVulkanLibrary)\n"
+                  "        {\n"
+                  "            mLibVulkanLibrary = angle::vk::OpenLibVulkan();\n"
+                  "        }\n"
+                  "#else\n"
+                  "        mLibVulkanLibrary = angle::vk::OpenLibVulkan();\n"
+                  "#endif\n"
+                  "        ANGLE_VK_CHECK(context, mLibVulkanLibrary, VK_ERROR_INITIALIZATION_FAILED);"
+              )
+              assert content.count(old3) == 1, (
+                  f"Hunk 3 anchor not found exactly once (found {content.count(old3)}) "
+                  f"in {target_file}. The OpenLibVulkan() call site inside "
+                  "Renderer::initialize() has likely changed (or moved/reindented) — "
+                  "update this workflow's old3/new3 to match the current file."
+              )
+              content = content.replace(old3, new3)
 
               with open(target_file, 'w', encoding='utf-8') as f:
                   f.write(content)
 
-              if not wired:
-                  print("ERROR: could not find any volkInitialize() call pattern in "
-                        f"{target_file}.")
-                  print("The helper function was inserted but is NOT called anywhere, so ")
-                  print("this build would silently do nothing useful. Failing the build ")
-                  print("instead of shipping a no-op patch — inspect the file below and ")
-                  print("update candidate_patterns in this workflow to match it.")
-                  # Print the lines around any 'volkInitialize' mention, if present at all,
-                  # to make manual follow-up fast.
-                  for i, line in enumerate(content.split('\n')):
-                      if 'volkInitialize' in line or 'Volk' in line:
-                          print(f"{target_file}:{i+1}: {line}")
-                  exit(1)
-
-              print(f"Patched {target_file} successfully!")
+              print(f"Patched {target_file} successfully — all 3 hunks applied.")
           PYEOF
 
       - name: Configure GN (Android arm64, Vulkan only, Optimized)
@@ -228,12 +198,13 @@ jobs:
             exit 1
           fi
 
-          echo "=== Verifying ZalithGenerateTurnipICD symbol is present ==="
-          if nm out/Android/libGLESv2_angle.so 2>/dev/null | grep -qi "ZalithGenerateTurnipICD" || \
-             strings out/Android/libGLESv2_angle.so | grep -qi "zalith_turnip_icd"; then
+          echo "=== Verifying ZalithOpenTurnipDirectly symbol is present ==="
+          if nm out/Android/libGLESv2_angle.so 2>/dev/null | grep -qi "ZalithOpenTurnipDirectly" || \
+             strings out/Android/libGLESv2_angle.so | grep -qi "libvulkan_freedreno"; then
             echo "✅ Patch appears to be linked into the binary."
           else
-            echo "⚠️  Could not verify patch symbol in binary (may be inlined/stripped later — check manually)."
+            echo "❌ Could not find any trace of the patch in the built library — it was likely optimized away or not actually applied. Failing build."
+            exit 1
           fi
 
           echo "=== Verifying EGL/GLES Symbols ==="
@@ -262,6 +233,6 @@ jobs:
       - name: Upload Android Libraries
         uses: actions/upload-artifact@v4
         with:
-          name: angle-android-arm64-zalith-turnip-icd
+          name: angle-android-arm64-zalith-turnip-direct
           path: release/*.so
           retention-days: 30
