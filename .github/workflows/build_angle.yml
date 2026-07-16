@@ -1,4 +1,4 @@
-name: Build ANGLE for Android (Embedded Qualcomm Driver)
+name: Build ANGLE for Android (Zalith Hooked Driver)
 
 on:
   push:
@@ -44,18 +44,59 @@ jobs:
           EOF
           gclient sync --no-history --shallow
 
-      - name: Patch ANGLE to load embedded Qualcomm Driver
+      - name: Patch ANGLE to load Zalith Hooked Driver
         run: |
-          echo "Patching ANGLE source code to bypass system libvulkan.so..."
-          # Tìm tất cả file mã nguồn có gọi libvulkan.so
-          FILES=$(grep -rl "libvulkan.so" --include="*.cpp" --include="*.h" --include="*.cc" src/ third_party/)
+          python3 << 'EOF'
+          import os, re
+          volk_file = "third_party/volk/volk.c"
+          if not os.path.exists(volk_file):
+              print("❌ volk.c not found!")
+              exit(1)
           
-          for f in $FILES; do
-            # Đổi libvulkan.so thành vulkan.adreno.so
-            # (Nếu file driver chính của bạn tên khác, hãy sửa dòng dưới này)
-            sed -i 's/libvulkan.so/lib_turnip.so/g' "$f"
-            echo "Patched: $f"
-          done
+          with open(volk_file, 'r') as f:
+              content = f.read()
+          
+          if 'volk_zalith_loader' in content:
+              print("Already patched!")
+              exit(0)
+              
+          # Thêm thư viện stdlib để dùng hàm getenv
+          if '#include <stdlib.h>' not in content:
+              content = '#include <stdlib.h>\n' + content
+              
+          # Hàm tự viết để đọc biến môi trường VK_ICD_FILENAMES do Zalith set
+          custom_func = '''
+          static void* volk_zalith_loader() {
+              const char* icd_path = getenv("VK_ICD_FILENAMES");
+              if (icd_path) {
+                  void* handle = dlopen(icd_path, RTLD_NOW | RTLD_LOCAL);
+                  if (handle) return handle;
+              }
+              return dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
+          }
+          '''
+          # Chèn hàm vào sau các dòng #include
+          matches = list(re.finditer(r'#include.*\n', content))
+          if matches:
+              last_match = matches[-1]
+              content = content[:last_match.end()] + custom_func + content[last_match.end():]
+              
+          # Thay thế lệnh dlopen gốc bằng lệnh gọi hàm mới
+          content = content.replace(
+              'handle = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);',
+              'handle = volk_zalith_loader();'
+          )
+          # Dự phòng nếu format code khác chút xíu
+          content = content.replace(
+              'dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL)',
+              'volk_zalith_loader()'
+          )
+          
+          with open(volk_file, 'w') as f:
+              f.write(content)
+              
+          print(f"Patched {volk_file} successfully!")
+          EOF
 
       - name: Configure GN (Android arm64, Vulkan only, Optimized)
         run: |
@@ -121,6 +162,6 @@ jobs:
       - name: Upload Android Libraries
         uses: actions/upload-artifact@v4
         with:
-          name: angle-android-arm64-embedded-qualcomm
+          name: angle-android-arm64-zalith-hook
           path: release/*.so
           retention-days: 30
