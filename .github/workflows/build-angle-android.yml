@@ -72,17 +72,8 @@ jobs:
             git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git "$DEPOT_TOOLS_DIR"
           fi
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
-
-      - name: Bootstrap depot_tools
-        run: |
-          export PATH="$DEPOT_TOOLS_DIR:$PATH"
-          export DEPOT_TOOLS_UPDATE=1
-          # Running any depot_tools entrypoint (gclient/gn/ninja wrapper) for the
-          # first time triggers depot_tools' own bootstrap, which generates the
-          # python3_bin_reldir.txt file that gn/gclient look for on later calls.
-          gclient --version
-          gn --version
-          ninja --version
+          # Suppress depot_tools' interactive metrics-collection prompt in CI.
+          echo "DEPOT_TOOLS_METRICS=0" >> "$GITHUB_ENV"
 
       - name: Cache ccache
         uses: actions/cache@v4
@@ -109,8 +100,8 @@ jobs:
         run: |
           export PATH="$DEPOT_TOOLS_DIR:$PATH"
           export DEPOT_TOOLS_UPDATE=0
-          gclient config --unmanaged --name=angle "$(git remote get-url origin)"
-          # Point gclient at this checkout instead of re-cloning
+
+          # Point gclient at this checkout instead of re-cloning from googlesource.
           cat > .gclient <<EOF
           solutions = [
             {
@@ -123,6 +114,10 @@ jobs:
           ]
           target_os = ["android"]
           EOF
+
+          # First real depot_tools invocation: this is what fetches the CIPD-hosted
+          # gn/ninja binaries and generates python3_bin_reldir.txt, in addition to
+          # syncing third_party/ deps (including the pinned Android NDK).
           gclient sync -D --no-history --shallow
 
       - name: Generate GN build files
